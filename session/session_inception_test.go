@@ -128,7 +128,7 @@ inception_magic_commit;`
 			continue
 		}
 		n := strings.Replace(name, "'", "", -1)
-		res := s.tk.MustQueryInc(fmt.Sprintf(exec, "drop table "+n))
+		res := s.tk.MustQueryInc(fmt.Sprintf(exec, "drop table `"+n+"`"))
 		// fmt.Println(res.Rows())
 		c.Assert(int(s.tk.Se.AffectedRows()), Equals, 2)
 		row := res.Rows()[int(s.tk.Se.AffectedRows())-1]
@@ -230,7 +230,7 @@ func (s *testSessionIncSuite) getExplicitDefaultsForTimestamp(c *C) bool {
 	sql := "show variables where Variable_name='explicit_defaults_for_timestamp';"
 
 	res := makeSQL(s.tk, sql)
-	c.Assert(int(s.tk.Se.AffectedRows()), Equals, 2)
+	c.Assert(int(s.tk.Se.AffectedRows()), Equals, 2, Commentf("%v", res.Rows()))
 
 	row := res.Rows()[int(s.tk.Se.AffectedRows())-1]
 	versionStr := row[5].(string)
@@ -794,6 +794,18 @@ primary key(id)) comment 'test';`
 	sql = `drop table if exists t1;CREATE TABLE t1(c1 int,c2 datetime);`
 	s.testErrorCode(c, sql)
 
+	config.GetGlobalConfig().Inc.MustHaveColumns = ""
+
+	// 测试表名大小写
+	sql = `drop table if exists t1;CREATE TABLE t1(c1 int);insert into T1 values(1);`
+	s.testErrorCode(c, sql)
+
+	// 无效默认值
+	config.GetGlobalConfig().Inc.CheckAutoIncrementName = true
+	sql = `create table t1(c1 int auto_increment primary key,c2 int);`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_AUTO_INCR_ID_WARNING, "c1"))
+
 }
 
 func (s *testSessionIncSuite) TestDropTable(c *C) {
@@ -972,6 +984,11 @@ func (s *testSessionIncSuite) TestAlterTableAddColumn(c *C) {
 	// 指定特殊选项
 	sql = "drop table if exists t1;create table t1 (id int primary key);alter table t1 add column c1 int,ALGORITHM=INPLACE, LOCK=NONE;"
 	s.testErrorCode(c, sql)
+
+	config.GetGlobalConfig().Inc.CheckIdentifier = false
+	// 特殊字符
+	sql = "drop table if exists `t3!@#$^&*()`;create table `t3!@#$^&*()`(id int primary key);alter table `t3!@#$^&*()` add column `c3!@#$^&*()2` int comment '123';"
+	s.testErrorCode(c, sql)
 }
 
 func (s *testSessionIncSuite) TestAlterTableAlterColumn(c *C) {
@@ -1132,6 +1149,23 @@ func (s *testSessionIncSuite) TestAlterTableModifyColumn(c *C) {
 	sql = "create table t1(id int primary key,c1 int);alter table t1 modify t.c1 int"
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ER_WRONG_TABLE_NAME, "t"))
+
+	config.GetGlobalConfig().Inc.CheckColumnPositionChange = true
+	sql = "create table t1(id int primary key,c1 int,c2 int);alter table t1 add column c3 int first"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrCantChangeColumnPosition, "t1.c3"))
+	sql = "create table t1(id int primary key,c1 int,c2 int);alter table t1 add column c3 int after c1"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrCantChangeColumnPosition, "t1.c3"))
+
+	sql = "create table t1(id int primary key,c1 int,c2 int);alter table t1 modify column c1 int after c2"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrCantChangeColumnPosition, "t1.c1"))
+	sql = "create table t1(id int primary key,c1 int,c2 int);alter table t1 change column c1 c3 int after id"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrCantChangeColumnPosition, "t1.c3"))
+
+	config.GetGlobalConfig().Inc.CheckColumnPositionChange = false
 }
 
 func (s *testSessionIncSuite) TestAlterTableDropColumn(c *C) {
@@ -1319,6 +1353,42 @@ insert into t2 select id from t1;`
 
 	sql = `insert into test_inc.tt1 select * from test_inc.tt1 ;`
 	s.testErrorCode(c, sql)
+
+	sql = `insert into test_inc.tt1(id)values(c1);`
+	s.testErrorCode(c, sql)
+
+	sql = `insert into test_inc.tt1(id)values(now);`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "now"))
+
+	sql = `insert into t1(id) values(nullif(a,'123'));`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "a"))
+
+	sql = `insert into t1(id) values(now);`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "now"))
+
+	sql = `insert into t1(id) values(now());`
+	s.testErrorCode(c, sql)
+
+	sql = `insert into t1(id) values(max(1));`
+	s.testErrorCode(c, sql)
+
+	sql = `insert into t1(id) values(max(a));`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "a"))
+
+	sql = `insert into t1(id) values(abs(-1));`
+	s.testErrorCode(c, sql)
+
+	sql = `insert into t1(id) values(cast(a as signed));`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "a"))
+
+	sql = `drop table if exists tt1;create table tt1(id int,c1 int);insert into tt1(id) select max(id) from tt1 where id in (select id1 from tt1);`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "id1"))
 
 }
 

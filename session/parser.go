@@ -9,6 +9,7 @@ import (
 	"github.com/hanchuanchuan/go-mysql/replication"
 	"github.com/juju/errors"
 	log "github.com/sirupsen/logrus"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,7 +79,9 @@ func (s *session) GetNextBackupRecord() *Record {
 				s.ch <- &ChanData{sqlStr: r.DDLRollback, opid: r.OPID,
 					table: s.lastBackupTable, record: r}
 
-				r.StageStatus = StatusBackupOK
+				if r.StageStatus != StatusExecFail {
+					r.StageStatus = StatusBackupOK
+				}
 
 				continue
 
@@ -190,9 +193,14 @@ func (s *session) Parser(ctx context.Context) {
 	// 启用Logger，显示详细日志
 	// s.backupdb.LogMode(true)
 
+	flavor := "mysql"
+	if s.DBType == DBTypeMariaDB {
+		flavor = "mariadb"
+	}
+
 	cfg := replication.BinlogSyncerConfig{
 		ServerID: 2000111111,
-		// Flavor:   p.cfg.Flavor,
+		Flavor:   flavor,
 
 		Host:     s.opt.host,
 		Port:     uint16(s.opt.port),
@@ -454,7 +462,10 @@ func (s *session) generateInsertSql(t *TableInfo, e *replication.RowsEvent,
 	for _, rows := range e.Rows {
 
 		var vv []driver.Value
-		for _, d := range rows {
+		for i, d := range rows {
+			if t.Fields[i].IsUnsigned() {
+				d = processValue(d, GetDataTypeBase(t.Fields[i].Type))
+			}
 			vv = append(vv, d)
 			// if _, ok := d.([]byte); ok {
 			//  log.Info().Msgf("%s:%q\n", t.Fields[j].Field, d)
@@ -496,6 +507,9 @@ func (s *session) generateDeleteSql(t *TableInfo, e *replication.RowsEvent,
 			if t.hasPrimary {
 				_, ok := t.primarys[i]
 				if ok {
+					if t.Fields[i].IsUnsigned() {
+						d = processValue(d, GetDataTypeBase(t.Fields[i].Type))
+					}
 					vv = append(vv, d)
 					if d == nil {
 						columnNames = append(columnNames,
@@ -506,6 +520,9 @@ func (s *session) generateDeleteSql(t *TableInfo, e *replication.RowsEvent,
 					}
 				}
 			} else {
+				if t.Fields[i].IsUnsigned() {
+					d = processValue(d, GetDataTypeBase(t.Fields[i].Type))
+				}
 				vv = append(vv, d)
 
 				if d == nil {
@@ -528,6 +545,56 @@ func (s *session) generateDeleteSql(t *TableInfo, e *replication.RowsEvent,
 	}
 
 	return string(buf), nil
+}
+
+func processValue(value driver.Value, dataType string) driver.Value {
+	if value == nil {
+		return value
+	}
+
+	// log.Info(value)
+	// log.Infof("%T", value)
+
+	switch v := value.(type) {
+	case int8:
+		if v >= 0 {
+			return value
+		}
+		return int64(1<<8 + int64(v))
+	case int16:
+		if v >= 0 {
+			return value
+		}
+		return int64(1<<16 + int64(v))
+	case int32:
+		if v >= 0 {
+			return value
+		}
+		if dataType == "mediumint" {
+			return int64(1<<24 + int64(v))
+		}
+		return int64(1<<32 + int64(v))
+	case int64:
+		if v >= 0 {
+			return value
+		}
+		return math.MaxUint64 - uint64(abs(v)) + 1
+	// case int:
+	// case float32:
+	// case float64:
+
+	default:
+		// log.Error("解析错误")
+		// log.Errorf("%T", v)
+		return value
+	}
+
+	return value
+}
+
+func abs(n int64) int64 {
+	y := n >> 63
+	return (n ^ y) - y
 }
 
 func (s *session) generateUpdateSql(t *TableInfo, e *replication.RowsEvent,
@@ -569,7 +636,10 @@ func (s *session) generateUpdateSql(t *TableInfo, e *replication.RowsEvent,
 
 		if i%2 == 0 {
 			// 旧值
-			for _, d := range rows {
+			for j, d := range rows {
+				if t.Fields[j].IsUnsigned() {
+					d = processValue(d, GetDataTypeBase(t.Fields[j].Type))
+				}
 				newValues = append(newValues, d)
 			}
 		} else {
@@ -580,6 +650,9 @@ func (s *session) generateUpdateSql(t *TableInfo, e *replication.RowsEvent,
 				if t.hasPrimary {
 					_, ok := t.primarys[j]
 					if ok {
+						if t.Fields[j].IsUnsigned() {
+							d = processValue(d, GetDataTypeBase(t.Fields[j].Type))
+						}
 						oldValues = append(oldValues, d)
 
 						if d == nil {
@@ -591,6 +664,9 @@ func (s *session) generateUpdateSql(t *TableInfo, e *replication.RowsEvent,
 						}
 					}
 				} else {
+					if t.Fields[j].IsUnsigned() {
+						d = processValue(d, GetDataTypeBase(t.Fields[j].Type))
+					}
 					oldValues = append(oldValues, d)
 
 					if d == nil {
@@ -661,6 +737,8 @@ func InterpolateParams(query string, args []driver.Value) ([]byte, error) {
 			buf = strconv.AppendInt(buf, int64(v), 10)
 		case int64:
 			buf = strconv.AppendInt(buf, v, 10)
+		case uint64:
+			buf = strconv.AppendUint(buf, uint64(v), 10)
 		case int:
 			buf = strconv.AppendInt(buf, int64(v), 10)
 		case float32:

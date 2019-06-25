@@ -222,6 +222,12 @@ type session struct {
 
 	// 判断kill操作在哪个阶段,如果是在执行阶段时,则不停止备份
 	killExecute bool
+
+	// 统计信息
+	statistics *statisticsInfo
+
+	// DDL和DML分隔结果
+	splitSets *SplitSets
 }
 
 // DDLOwnerChecker returns s.ddlOwnerChecker.
@@ -1557,14 +1563,11 @@ func logStmt(node ast.StmtNode, vars *variable.SessionVars) {
 }
 
 func logQuery(query string, vars *variable.SessionVars) {
-	// log.Info(atomic.LoadUint32(&variable.ProcessGeneralLog))
-	// log.Info(vars.InRestrictedSQL)
-	// if atomic.LoadUint32(&variable.ProcessGeneralLog) != 0 && !vars.InRestrictedSQL {
-	// if !vars.InRestrictedSQL {
-	// 	query = executor.QueryReplacer.Replace(query)
-	// 	// log.Infof("[GENERAL_LOG] con:%d user:%s schema_ver:%d start_ts:%d sql:%s%s",
-	// 	// 	vars.ConnectionID, vars.User, vars.TxnCtx.SchemaVersion, vars.TxnCtx.StartTS, query, vars.GetExecuteArgumentsInfo())
-	// 	log.Infof("[GENERAL_LOG] con:%d user:%s sql:%s%s",
-	// 		vars.ConnectionID, vars.User, query, vars.GetExecuteArgumentsInfo())
-	// }
+	if atomic.LoadUint32(&variable.ProcessGeneralLog) != 0 && !vars.InRestrictedSQL {
+		query = executor.QueryReplacer.Replace(query)
+		// log.Infof("[GENERAL_LOG] con:%d user:%s schema_ver:%d start_ts:%d sql:%s%s",
+		// 	vars.ConnectionID, vars.User, vars.TxnCtx.SchemaVersion, vars.TxnCtx.StartTS, query, vars.GetExecuteArgumentsInfo())
+		log.Infof("[GENERAL_LOG] con:%d user:%s sql:%s%s",
+			vars.ConnectionID, vars.User, query, vars.GetExecuteArgumentsInfo())
+	}
 }

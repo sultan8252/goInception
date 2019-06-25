@@ -510,6 +510,15 @@ crtTime datetime not null DEFAULT CURRENT_TIMESTAMP comment 'test',
 uptTime datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP comment 'test',
 primary key(id)) comment 'test';`
 	s.testErrorCode(c, sql)
+
+	res = makeExecSQL(tk, "drop table if exists t1;create table t1(c1 int);")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	c.Assert(row[2], Equals, "0")
+
+	// 测试表名大小写
+	sql = "insert into T1 values(1);"
+	s.testErrorCode(c, sql)
+
 }
 
 func (s *testSessionIncExecSuite) TestDropTable(c *C) {
@@ -692,6 +701,21 @@ func (s *testSessionIncExecSuite) TestAlterTableAddColumn(c *C) {
 	// 指定特殊选项
 	sql = "drop table if exists t1;create table t1 (id int primary key);alter table t1 add column c1 int,ALGORITHM=INPLACE, LOCK=NONE;"
 	s.testErrorCode(c, sql)
+
+	// 特殊字符
+	config.GetGlobalConfig().Inc.CheckIdentifier = false
+	sql = "drop table if exists `t3!@#$^&*()`;create table `t3!@#$^&*()`(id int primary key);alter table `t3!@#$^&*()` add column `c3!@#$^&*()2` int comment '123';"
+	s.testErrorCode(c, sql)
+
+	// pt-osc
+	config.GetGlobalConfig().Osc.OscOn = true
+	s.testErrorCode(c, sql)
+
+	// gh-ost
+	config.GetGlobalConfig().Osc.OscOn = false
+	config.GetGlobalConfig().Ghost.GhostOn = true
+	s.testErrorCode(c, sql)
+
 }
 
 func (s *testSessionIncExecSuite) TestAlterTableAlterColumn(c *C) {
@@ -953,7 +977,7 @@ func (s *testSessionIncExecSuite) TestInsert(c *C) {
 	res = makeExecSQL(tk, "drop table if exists t1;drop table if exists t2;create table t1(id int,c1 int );insert into t1(id,c1) select 1,null from t2;")
 	row = res.Rows()[int(tk.Se.AffectedRows())-1]
 	c.Assert(row[2], Equals, "2")
-	c.Assert(row[4], Equals, "Execute: Table 'test_inc.t2' doesn't exist.")
+	c.Assert(row[4], Equals, "Table 'test_inc.t2' doesn't exist.")
 
 	// select where
 	config.GetGlobalConfig().Inc.CheckDMLWhere = true
@@ -1313,6 +1337,27 @@ func (s *testSessionIncExecSuite) TestShowVariables(c *C) {
 		c.Assert(row[1].(string)[:1], Equals, "*")
 	}
 }
+
+// 无法审核，原因是需要自己做SetSessionManager
+// func (s *testSessionIncExecSuite) TestShowProcesslist(c *C) {
+// 	tk := testkit.NewTestKitWithInit(c, s.store)
+
+// 	sql := ""
+// 	sql = "inception show processlist;"
+// 	tk.MustQueryInc(sql)
+// 	c.Assert(tk.Se.AffectedRows(), GreaterEqual, 1)
+
+// 	sql = "inception get processlist;"
+// 	tk.MustQueryInc(sql)
+// 	c.Assert(tk.Se.AffectedRows(), GreaterEqual, 1)
+
+// 	sql = "inception show variables like 'backup_password';"
+// 	res := tk.MustQueryInc(sql)
+// 	row := res.Rows()[int(tk.Se.AffectedRows())-1]
+// 	if row[1].(string) != "" {
+// 		c.Assert(row[1].(string)[:1], Equals, "*")
+// 	}
+// }
 
 func (s *testSessionIncExecSuite) TestSetVariables(c *C) {
 	tk := testkit.NewTestKitWithInit(c, s.store)

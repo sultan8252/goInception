@@ -1,6 +1,75 @@
 # goInception 更新日志
 
 
+## [v1.0-rc2] - 2019-6-21
+
+### Fix
+* 优化回滚相关表结构,字符集调整为utf8mb4 (`历史表结构需要手动调整`)
+
+### Update
+* 优化审核规则,审核子查询、函数等各种表达式 (#44)
+* 优化gh-ost默认生成的socket文件名格式
+* 优化日志输出,添加线程号显示
+* binlog解析时添加mariadb判断
+
+
+## [v1.0-rc1] - 2019-6-12
+
+### New Features
+* 添加split分隔功能 (#42)
+
+
+## [v0.9-beta] - 2019-6-4
+
+### New Features
+* 添加统计功能,可通过参数 `enable_sql_statistic` 启用 (#38)
+* 添加参数 `check_column_position_change` ,可控制是否检查列位置/顺序变更 (#40, #41)
+
+### Update
+* 优化使用阿里云RDS和gh-ost时的逻辑,自动设置 `assume-master-host` 参数 (#39)
+
+
+## [v0.8.3-beta] - 2019-5-30
+
+### Fix
+* 修复gh-ost的initially-drop-old-table和initially-drop-ghost-table参数支持
+* 修复设置osc_min_table_size大于0后无法正常启用osc的bug
+
+### Update
+* 兼容语法inception get processlist
+* docker镜像内置pt-osc包(版本3.0.13)
+
+
+## [v0.8.2-beta] - 2019-5-27
+
+### Fix
+* fix: 修复binlog解析时对unsigned列溢出值的处理
+* fix: 修复gh-ost执行语句有反引号时报语法错误的bug (#33)
+* fix: 修复kill DDL操作时,返回执行和备份成功的bug,现在会提示执行结果未知了 (#34)
+
+
+## [v0.8.1-beta] - 2019-5-24
+
+### Fix
+* 修复新建表后,使用大小写不一致的表名时返回表不存在bug
+
+### New Features
+* 添加general_log参数,用以记录全量日志
+
+### Update
+* 优化insert select新表的审核规则,现在select新表时也可以审核了
+
+
+## [v0.8-beta] - 2019-5-22
+
+### Fix
+* 修复当开启sql指纹功能时,可能出现把警告误标记为错误的bug
+
+### Update
+* 优化子查询审核规则,递归审核所有子查询
+* 审核group by语法和聚合函数
+
+
 ## [v0.7.5-beta] - 2019-5-17
 
 ### Fix

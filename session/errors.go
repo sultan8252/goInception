@@ -194,6 +194,7 @@ const (
 	//ER_NULL_NAME_FOR_INDEX
 	ErrMixOfGroupFuncAndFields
 	ErrFieldNotInGroupBy
+	ErrCantChangeColumnPosition
 	ER_ERROR_LAST
 )
 
@@ -354,6 +355,7 @@ var ErrorsDefault = map[int]string{
 	ER_ERROR_LAST:                          "TheLastError,ByeBye",
 	ErrMixOfGroupFuncAndFields:             "In aggregated query without GROUP BY, expression #%d of SELECT list contains nonaggregated column '%s'; this is incompatible with sql_mode=only_full_group_by.",
 	ErrFieldNotInGroupBy:                   "Expression #%d of %s is not in GROUP BY clause and contains nonaggregated column '%s' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by.",
+	ErrCantChangeColumnPosition:            "Cannot change the position of the column '%s'",
 	// ErrMixOfGroupFuncAndFields:             "Mixing of GROUP columns (MIN(),MAX(),COUNT(),...) with no GROUP columns is illegal if there is no GROUP BY clause",
 	//ER_NULL_NAME_FOR_INDEX:                 "Index name cannot be null in table '%s'.",
 }
@@ -462,7 +464,7 @@ var ErrorsChinese = map[int]string{
 	ER_SET_DATA_TYPE_INT_BIGINT:            "自增列需要设置为int或bigint类型.",
 	ER_TIMESTAMP_DEFAULT:                   "请设置timestamp列 '%s' 的默认值.",
 	ER_CHARSET_ON_COLUMN:                   "表 '%s' 列 '%s' 禁止设置字符集!",
-	ER_AUTO_INCR_ID_WARNING:                "自增列建议命名为'ID'.",
+	ER_AUTO_INCR_ID_WARNING:                "自增列('%s')建议命名为'ID'.",
 	ER_ALTER_TABLE_ONCE:                    "表 '%s' 的多个alter操作请合并成一个.",
 	ER_BLOB_CANT_HAVE_DEFAULT:              "BLOB,TEXT,GEOMETRY或JSON列 '%s' 禁止设置默认值.",
 	ER_END_WITH_SEMICOLON:                  "Add ';' after the last sql statement.",
@@ -511,6 +513,7 @@ var ErrorsChinese = map[int]string{
 	ErrCollationNotSupport:                 "允许的排序规则: '%s'.",
 	ErrWrongUsage:                          "%s子句无法使用%s",
 	ErrJsonTypeSupport:                     "不允许使用json类型(列'%s').",
+	ErrCantChangeColumnPosition:            "不允许改变列顺序(列'%s').",
 	//ER_NULL_NAME_FOR_INDEX:                 "在表 '%s' 中, 索引名称不能为空.",
 }
 
@@ -562,6 +565,7 @@ func GetErrorLevel(errorNo int) uint8 {
 		ErrNotFoundTableInfo,
 		ErrNotFoundThreadId,
 		ER_MUST_HAVE_COLUMNS,
+		ErrCantChangeColumnPosition,
 		ER_CHANGE_COLUMN_TYPE:
 		return 1
 

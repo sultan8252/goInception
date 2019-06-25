@@ -254,6 +254,28 @@ func (s *testSessionIncBackupSuite) TestAlterTableAddColumn(c *C) {
 	backup = s.query("t1", row[7].(string))
 	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` DROP COLUMN `c3`,DROP COLUMN `c4`;")
 
+	// 特殊字符
+	config.GetGlobalConfig().Inc.CheckIdentifier = false
+	res = s.makeSQL(c, tk, "drop table if exists `t3!@#$^&*()`;create table `t3!@#$^&*()`(id int primary key);alter table `t3!@#$^&*()` add column `c3!@#$^&*()2` int comment '123';")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t3!@#$^&*()", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t3!@#$^&*()` DROP COLUMN `c3!@#$^&*()2`;", Commentf("%v", res.Rows()))
+
+	// pt-osc
+	config.GetGlobalConfig().Osc.OscOn = true
+	res = s.makeSQL(c, tk, "drop table if exists `t3!@#$^&*()`;create table `t3!@#$^&*()`(id int primary key);alter table `t3!@#$^&*()` add column `c3!@#$^&*()2` int comment '123';")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t3!@#$^&*()", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t3!@#$^&*()` DROP COLUMN `c3!@#$^&*()2`;", Commentf("%v", res.Rows()))
+
+	// gh-ost
+	config.GetGlobalConfig().Osc.OscOn = false
+	config.GetGlobalConfig().Ghost.GhostOn = true
+	res = s.makeSQL(c, tk, "drop table if exists `t3!@#$^&*()`;create table `t3!@#$^&*()`(id int primary key);alter table `t3!@#$^&*()` add column `c3!@#$^&*()2` int comment '123';")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t3!@#$^&*()", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t3!@#$^&*()` DROP COLUMN `c3!@#$^&*()2`;", Commentf("%v", res.Rows()))
+
 }
 
 func (s *testSessionIncBackupSuite) TestAlterTableAlterColumn(c *C) {
@@ -385,6 +407,84 @@ func (s *testSessionIncBackupSuite) TestInsert(c *C) {
 	c.Assert(backup, Equals, "DROP TABLE `test_inc`.`t1`;", Commentf("%v", res.Rows()))
 
 	res = s.makeSQL(c, tk, "insert into t1 values(1);")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1;", Commentf("%v", res.Rows()))
+
+	// 值溢出时的回滚解析
+	res = s.makeSQL(c, tk, `drop table if exists t1;
+		create table t1(id int primary key,
+			c1 tinyint unsigned,
+			c2 smallint unsigned,
+			c3 mediumint unsigned,
+			c4 int unsigned,
+			c5 bigint unsigned
+		);`)
+	res = s.makeSQL(c, tk, "insert into t1 values(1,128,32768,8388608,2147483648,9223372036854775808);")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1;", Commentf("%v", res.Rows()))
+
+	res = s.makeSQL(c, tk, `drop table if exists t1;
+		create table t1(id int,
+			c1 tinyint unsigned,
+			c2 smallint unsigned,
+			c3 mediumint unsigned,
+			c4 int unsigned,
+			c5 bigint unsigned,
+			c6 decimal unsigned,
+			c7 decimal(4,2) unsigned,
+			c8 float unsigned,
+			c9 double unsigned
+		);`)
+	res = s.makeSQL(c, tk, `insert into t1 values(1,128,32768,8388608,2147483648,9223372036854775808,
+		9999999999,99.99,3.402823466e+38,1.7976931348623157e+308);`)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1 AND `c1`=128 AND `c2`=32768 AND "+
+		"`c3`=8388608 AND `c4`=2147483648 AND `c5`=9223372036854775808 AND "+
+		"`c6`=9.999999999e+09 AND `c7`=99.99 AND `c8`=3.4028235e+38 AND `c9`=1.7976931348623157e+308;", Commentf("%v", res.Rows()))
+
+	res = s.makeSQL(c, tk, `update t1 set c1 = 129,
+		c2 = 32769,
+		c3 = 8388609,
+		c4 = 2147483649,
+		c5 = 9223372036854775809,
+		c6 = 9999999990,
+		c7 = 88.88,
+		c8 = 3e+38,
+		c9 = 1e+308
+		where id = 1;`)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "UPDATE `test_inc`.`t1` SET `id`=1, `c1`=128, `c2`=32768, "+
+		"`c3`=8388608, `c4`=2147483648, `c5`=9223372036854775808, `c6`=9.999999999e+09, "+
+		"`c7`=99.99, `c8`=3.4028235e+38, `c9`=1.7976931348623157e+308 "+
+		"WHERE `id`=1 AND `c1`=129 AND `c2`=32769 AND `c3`=8388609 AND "+
+		"`c4`=2147483649 AND `c5`=9223372036854775809 AND `c6`=9.99999999e+09 "+
+		"AND `c7`=88.88 AND `c8`=3e+38 AND `c9`=1e+308;", Commentf("%v", res.Rows()))
+
+	res = s.makeSQL(c, tk, `delete from t1 where id = 1;`)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "INSERT INTO `test_inc`.`t1`(`id`,`c1`,`c2`,`c3`,`c4`,`c5`,`c6`,`c7`,`c8`,`c9`)"+
+		" VALUES(1,129,32769,8388609,2147483649,9223372036854775809,9.99999999e+09,88.88,3e+38,1e+308);", Commentf("%v", res.Rows()))
+
+	res = s.makeSQL(c, tk, `drop table if exists t1;
+		create table t1(c1 bigint unsigned);`)
+	res = s.makeSQL(c, tk, `insert into t1 values(9223372036854775808);`)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `c1`=9223372036854775808;", Commentf("%v", res.Rows()))
+
+	res = s.makeSQL(c, tk, `insert into t1 values(18446744073709551615);`)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `c1`=18446744073709551615;", Commentf("%v", res.Rows()))
+
+	res = s.makeSQL(c, tk, `drop table if exists t1;
+create table t1(id int primary key,c1 varchar(100))default character set utf8mb4;
+insert into t1(id,c1)values(1,'😁😄🙂👩');`)
 	row = res.Rows()[int(tk.Se.AffectedRows())-1]
 	backup = s.query("t1", row[7].(string))
 	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1;", Commentf("%v", res.Rows()))
@@ -545,6 +645,14 @@ func (s *testSessionIncBackupSuite) TestDelete(c *C) {
 	backup = s.query("t1", row[7].(string))
 	c.Assert(backup, Equals, "INSERT INTO `test_inc`.`t1`(`id`,`c1`) VALUES(1,2019);", Commentf("%v", res.Rows()))
 
+	s.makeSQL(c, tk, `drop table if exists t1;
+	create table t1(id int primary key,c1 varchar(100))default character set utf8mb4;
+	insert into t1(id,c1)values(1,'😁😄🙂👩');`)
+	res = s.makeSQL(c, tk, "delete from t1;")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "INSERT INTO `test_inc`.`t1`(`id`,`c1`) VALUES(1,'😁😄🙂👩');", Commentf("%v", res.Rows()))
+
 }
 
 func (s *testSessionIncBackupSuite) TestCreateDataBase(c *C) {
@@ -672,7 +780,7 @@ func (s *testSessionIncBackupSuite) query(table, opid string) string {
 	}
 
 	result := []string{}
-	sql := "select rollback_statement from 127_0_0_1_3306_test_inc.%s where opid_time = ?;"
+	sql := "select rollback_statement from 127_0_0_1_3306_test_inc.`%s` where opid_time = ?;"
 	sql = fmt.Sprintf(sql, table)
 
 	rows, err := s.db.Raw(sql, opid).Rows()
@@ -688,6 +796,57 @@ func (s *testSessionIncBackupSuite) query(table, opid string) string {
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+func (s *testSessionIncBackupSuite) queryStatistics() []int {
+	inc := config.GetGlobalConfig().Inc
+	if s.db == nil || s.db.DB().Ping() != nil {
+		// dbName := "127_0_0_1_3306_test_inc"
+		addr := fmt.Sprintf("%s:%s@tcp(%s:%d)/mysql?charset=utf8mb4&parseTime=True&loc=Local&maxAllowedPacket=4194304",
+			inc.BackupUser, inc.BackupPassword, inc.BackupHost, inc.BackupPort)
+		db, err := gorm.Open("mysql", addr)
+		if err != nil {
+			fmt.Println(err)
+		}
+		// 禁用日志记录器，不显示任何日志
+		db.LogMode(false)
+		s.db = db
+	}
+
+	sql := `select usedb, deleting, inserting, updating,
+		selecting, altertable, renaming, createindex, dropindex, addcolumn,
+		dropcolumn, changecolumn, alteroption, alterconvert,
+		createtable, droptable, CREATEDB, truncating from inception.statistic order by id desc limit 1;`
+	values := make([]int, 18)
+
+	rows, err := s.db.Raw(sql).Rows()
+	if err != nil {
+		fmt.Println(err)
+		panic(err)
+	} else {
+		defer rows.Close()
+		for rows.Next() {
+			rows.Scan(&values[0],
+				&values[1],
+				&values[2],
+				&values[3],
+				&values[4],
+				&values[5],
+				&values[6],
+				&values[7],
+				&values[8],
+				&values[9],
+				&values[10],
+				&values[11],
+				&values[12],
+				&values[13],
+				&values[14],
+				&values[15],
+				&values[16],
+				&values[17])
+		}
+	}
+	return values
 }
 
 func trim(s string) string {
@@ -754,4 +913,87 @@ func (s *testSessionIncBackupSuite) getExplicitDefaultsForTimestamp(c *C) bool {
 		s.explicitDefaultsForTimestamp = true
 	}
 	return s.explicitDefaultsForTimestamp
+}
+
+func (s *testSessionIncBackupSuite) TestStatistics(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
+	saved := config.GetGlobalConfig().Inc
+	defer func() {
+		config.GetGlobalConfig().Inc = saved
+	}()
+
+	config.GetGlobalConfig().Inc.EnableSqlStatistic = true
+
+	sql := ""
+
+	sql = "drop table if exists t1;create table t1(id int,c1 int);alter table t1 drop column c1;alter table t1 add column c1 varchar(20);"
+	res := s.makeSQL(c, tk, sql)
+	statistics := s.queryStatistics()
+	result := []int{
+		1, // usedb,
+		0, // deleting,
+		0, // inserting,
+		0, // updating,
+		0, // selecting,
+		2, // altertable,
+		0, // renaming,
+		0, // createindex,
+		0, // dropindex,
+		1, // addcolumn,
+		1, // dropcolumn,
+		0, // changecolumn,
+		0, // alteroption,
+		0, // alterconvert,
+		1, // createtable,
+		1, // droptable,
+		0, // CREATEDB,
+		0, // truncating
+	}
+
+	c.Assert(len(statistics), Equals, len(result), Commentf("%v", res.Rows()))
+	for i, v := range statistics {
+		c.Assert(v, Equals, result[i], Commentf("%v", res.Rows()))
+	}
+
+	sql = `
+	DROP TABLE IF EXISTS t1;
+
+	CREATE TABLE t1(id int,c1 int);
+	ALTER TABLE t1 add COLUMN c2 int;
+	ALTER TABLE t1 modify COLUMN c2 varchar(100);
+	alter table t1 alter column c1 set default 100;
+
+	insert into t1(id) values(1);
+	update t1 set c1=1 where id=1;
+	delete from t1 where id=1;
+
+	truncate table t1;
+	`
+	res = s.makeSQL(c, tk, sql)
+	statistics = s.queryStatistics()
+	result = []int{
+		1, // usedb,
+		1, // deleting,
+		1, // inserting,
+		1, // updating,
+		0, // selecting,
+		3, // altertable,
+		0, // renaming,
+		0, // createindex,
+		0, // dropindex,
+		1, // addcolumn,
+		0, // dropcolumn,
+		1, // changecolumn,
+		0, // alteroption,
+		0, // alterconvert,
+		1, // createtable,
+		1, // droptable,
+		0, // CREATEDB,
+		1, // truncating
+	}
+
+	c.Assert(len(statistics), Equals, len(result), Commentf("%v", res.Rows()))
+	for i, v := range statistics {
+		c.Assert(v, Equals, result[i], Commentf("%v", statistics))
+	}
 }

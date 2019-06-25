@@ -277,7 +277,11 @@ type Inc struct {
 	CheckAutoIncrementName      bool `toml:"check_autoincrement_name" json:"check_autoincrement_name"`
 	CheckColumnComment          bool `toml:"check_column_comment" json:"check_column_comment"`
 	// 检查列类型变更(允许长度变更,类型变更时警告)
-	CheckColumnTypeChange   bool `toml:"check_column_type_change" json:"check_column_type_change"`
+	CheckColumnTypeChange bool `toml:"check_column_type_change" json:"check_column_type_change"`
+
+	// 检查列顺序变更 #40
+	CheckColumnPositionChange bool `toml:"check_column_position_change" json:"check_column_position_change"`
+
 	CheckColumnDefaultValue bool `toml:"check_column_default_value" json:"check_column_default_value"`
 	CheckDMLLimit           bool `toml:"check_dml_limit" json:"check_dml_limit"`
 	CheckDMLOrderBy         bool `toml:"check_dml_orderby" json:"check_dml_orderby"`
@@ -313,11 +317,20 @@ type Inc struct {
 	EnableSetCharset   bool `toml:"enable_set_charset" json:"enable_set_charset"`
 	EnableSetCollation bool `toml:"enable_set_collation" json:"enable_set_collation"`
 
+	// 开启sql统计
+	EnableSqlStatistic bool `toml:"enable_sql_statistic" json:"enable_sql_statistic"`
+
+	// 全量日志
+	GeneralLog bool `toml:"general_log" json:"general_log"`
+
 	Lang          string `toml:"lang" json:"lang"`
 	MaxCharLength uint   `toml:"max_char_length" json:"max_char_length"`
 
 	// 一次最多写入的行数, 仅判断insert values语法
 	MaxInsertRows uint `toml:"max_insert_rows" json:"max_insert_rows"`
+
+	// 连接服务器允许的最大包大小,以字节为单位 默认值为4194304(即4MB)
+	MaxAllowedPacket uint `toml:"max_allowed_packet" json:"max_allowed_packet"`
 
 	MaxKeys       uint `toml:"max_keys" json:"max_keys"`
 	MaxKeyParts   uint `toml:"max_key_parts" json:"max_key_parts"`
@@ -328,6 +341,9 @@ type Inc struct {
 
 	// 建表必须创建的列. 可指定多个列,以逗号分隔.列类型可选. 格式: 列名 [列类型,可选],...
 	MustHaveColumns string `toml:"must_have_columns" json:"must_have_columns"`
+
+	// 要跳过的sql语句, 多个时以分号分隔
+	SkipSqls string `toml:"skip_sqls" json:"skip_sqls"`
 
 	// 安全更新是否开启.
 	// -1 表示不做操作,基于远端数据库 [默认值]
@@ -640,6 +656,8 @@ var defaultConf = Config{
 		SupportCharset:        "utf8,utf8mb4",
 		Lang:                  "en-US",
 		CheckColumnTypeChange: true,
+
+		MaxAllowedPacket: 4194304,
 		// Version:            &mysql.TiDBReleaseVersion,
 	},
 	Osc: Osc{

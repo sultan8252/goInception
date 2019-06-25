@@ -34,6 +34,7 @@ import (
 
 	// "github.com/hanchuanchuan/goInception/ast"
 	// "github.com/hanchuanchuan/goInception/server"
+	"github.com/hanchuanchuan/goInception/config"
 	"github.com/hanchuanchuan/goInception/util"
 	"github.com/hanchuanchuan/goInception/util/auth"
 
@@ -99,7 +100,7 @@ func (s *session) mysqlExecuteAlterTableOsc(r *Record) {
 	buf := bytes.NewBufferString("pt-online-schema-change")
 
 	buf.WriteString(" --alter \"")
-	buf.WriteString(s.getAlterTablePostPart(r.Sql))
+	buf.WriteString(s.getAlterTablePostPart(r.Sql, true))
 
 	if s.hasError() {
 		return
@@ -178,12 +179,13 @@ func (s *session) mysqlExecuteAlterTableOsc(r *Record) {
 
 	buf.WriteString(" D=")
 	buf.WriteString(r.TableInfo.Schema)
-	buf.WriteString(",t=")
+	buf.WriteString(",t='")
 	buf.WriteString(r.TableInfo.Name)
+	buf.WriteString("'")
 
 	str := buf.String()
 
-	s.execCommand(r, "bash", []string{"-c", str})
+	s.execCommand(r, "sh", []string{"-c", str})
 
 }
 
@@ -192,7 +194,15 @@ func (s *session) mysqlExecuteAlterTableGhost(r *Record) {
 	// flag.StringVar(&migrationContext.InspectorConnectionConfig.Key.Hostname, "host", "127.0.0.1", "MySQL hostname (preferably a replica, not the master)")
 	migrationContext.InspectorConnectionConfig.Key.Hostname = s.opt.host
 	// flag.StringVar(&migrationContext.AssumeMasterHostname, "assume-master-host", "", "(optional) explicitly tell gh-ost the identity of the master. Format: some.host.com[:port] This is useful in master-master setups where you wish to pick an explicit master, or in a tungsten-replicator where gh-ost is unable to determine the master")
-	migrationContext.AssumeMasterHostname = s.Ghost.GhostAssumeMasterHost
+
+	// RDS数据库需要做特殊处理
+	if s.Ghost.GhostAliyunRds && s.Ghost.GhostAssumeMasterHost == "" {
+		migrationContext.AssumeMasterHostname = fmt.Sprintf("%s:%d", s.opt.host, s.opt.port)
+	} else {
+		migrationContext.AssumeMasterHostname = s.Ghost.GhostAssumeMasterHost
+	}
+
+	log.Debug("assume_master_host: ", migrationContext.AssumeMasterHostname)
 	// flag.IntVar(&migrationContext.InspectorConnectionConfig.Key.Port, "port", 3306, "MySQL port (preferably a replica, not the master)")
 	migrationContext.InspectorConnectionConfig.Key.Port = s.opt.port
 	// flag.StringVar(&migrationContext.CliUser, "user", "", "MySQL user")
@@ -213,7 +223,7 @@ func (s *session) mysqlExecuteAlterTableGhost(r *Record) {
 	// flag.StringVar(&migrationContext.DatabaseName, "database", "", "database name (mandatory)")
 	migrationContext.OriginalTableName = r.TableInfo.Name
 
-	migrationContext.AlterStatement = s.getAlterTablePostPart(r.Sql)
+	migrationContext.AlterStatement = s.getAlterTablePostPart(r.Sql, false)
 
 	// flag.StringVar(&migrationContext.OriginalTableName, "table", "", "table name (mandatory)")
 	// flag.StringVar(&migrationContext.AlterStatement, "alter", "", "alter statement (mandatory)")
@@ -252,9 +262,9 @@ func (s *session) mysqlExecuteAlterTableGhost(r *Record) {
 
 	migrationContext.OkToDropTable = s.Ghost.GhostOkToDropTable
 	// flag.BoolVar(&migrationContext.OkToDropTable, "ok-to-drop-table", false, "Shall the tool drop the old table at end of operation. DROPping tables can be a long locking operation, which is why I'm not doing it by default. I'm an online tool, yes?")
-	migrationContext.InitiallyDropOldTable = false
+	migrationContext.InitiallyDropOldTable = s.Ghost.GhostInitiallyDropOldTable
 	// flag.BoolVar(&migrationContext.InitiallyDropOldTable, "initially-drop-old-table", false, "Drop a possibly existing OLD table (remains from a previous run?) before beginning operation. Default is to panic and abort if such table exists")
-	migrationContext.InitiallyDropGhostTable = false
+	migrationContext.InitiallyDropGhostTable = s.Ghost.GhostInitiallyDropGhostTable
 	// flag.BoolVar(&migrationContext.InitiallyDropGhostTable, "initially-drop-ghost-table", false, "Drop a possibly existing Ghost table (remains from a previous run?) before beginning operation. Default is to panic and abort if such table exists")
 	migrationContext.TimestampOldTable = false
 	// flag.BoolVar(&migrationContext.TimestampOldTable, "timestamp-old-table", false, "Use a timestamp in old table name. This makes old table names unique and non conflicting cross migrations")
@@ -438,7 +448,8 @@ func (s *session) mysqlExecuteAlterTableGhost(r *Record) {
 		s.AppendErrorMessage(err.Error())
 	}
 	if migrationContext.ServeSocketFile == "" {
-		migrationContext.ServeSocketFile = fmt.Sprintf("/tmp/gh-ost.%s.%s.sock", migrationContext.DatabaseName, migrationContext.OriginalTableName)
+		migrationContext.ServeSocketFile = fmt.Sprintf("/tmp/gh-ost.%s.%d.%s.%s.sock", s.opt.host, s.opt.port,
+			migrationContext.DatabaseName, migrationContext.OriginalTableName)
 	}
 
 	migrationContext.SetHeartbeatIntervalMilliseconds(heartbeatIntervalMillis)
@@ -521,12 +532,17 @@ func (s *session) mysqlExecuteAlterTableGhost(r *Record) {
 		}
 	}
 
+	// log.Debugf("%#v", migrationContext)
+
 	migrator.Log = bytes.NewBufferString("")
 
 	go f(bufio.NewReader(migrator.Log))
 
-	// ghostlog.SetLevel(ghostlog.INFO)
-	ghostlog.SetLevel(ghostlog.ERROR)
+	if config.GetGlobalConfig().Log.Level == "debug" {
+		ghostlog.SetLevel(ghostlog.INFO)
+	} else {
+		ghostlog.SetLevel(ghostlog.ERROR)
+	}
 
 	if err := migrator.Migrate(); err != nil {
 		log.Error(err)
@@ -553,15 +569,19 @@ func (s *session) execCommand(r *Record, commandName string, params []string) bo
 	//函数返回一个*Cmd，用于使用给出的参数执行name指定的程序
 	cmd := exec.Command(commandName, params...)
 
+	// log.Infof("%s %s", commandName, params)
+
 	//StdoutPipe方法返回一个在命令Start后与命令标准输出关联的管道。Wait方法获知命令结束后会关闭这个管道，一般不需要显式的关闭该管道。
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		s.AppendErrorMessage(err.Error())
+		log.Error(err)
 		return false
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		s.AppendErrorMessage(err.Error())
+		log.Error(err)
 		return false
 	}
 
@@ -572,6 +592,7 @@ func (s *session) execCommand(r *Record, commandName string, params []string) bo
 	// 运行命令
 	if err := cmd.Start(); err != nil {
 		s.AppendErrorMessage(err.Error())
+		log.Error(err)
 		return false
 	}
 
@@ -622,6 +643,8 @@ func (s *session) execCommand(r *Record, commandName string, params []string) bo
 	err = cmd.Wait()
 	if err != nil {
 		s.AppendErrorMessage(err.Error())
+		log.Errorf("%s %s", commandName, params)
+		log.Error(err)
 	}
 	if p.Percent < 100 || s.hasError() {
 		r.StageStatus = StatusExecFail
@@ -687,7 +710,7 @@ func (s *session) mysqlAnalyzeGhostOutput(out string, p *util.OscProcessInfo) {
 
 }
 
-func (s *session) getAlterTablePostPart(sql string) string {
+func (s *session) getAlterTablePostPart(sql string, isPtOSC bool) string {
 
 	var buf []string
 	for _, line := range strings.Split(sql, "\n") {
@@ -750,7 +773,11 @@ func (s *session) getAlterTablePostPart(sql string) string {
 	sql = strings.Join(parts[3:], " ")
 
 	sql = strings.Replace(sql, "\"", "\\\"", -1)
-	sql = strings.Replace(sql, "`", "\\`", -1)
+
+	// gh-ost不需要处理`,pt-osc需要处理
+	if isPtOSC {
+		sql = strings.Replace(sql, "`", "\\`", -1)
+	}
 
 	return sql
 }
