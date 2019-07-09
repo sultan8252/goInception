@@ -25,6 +25,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	// "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,9 +103,18 @@ type sourceOptions struct {
 	backup         bool
 	ignoreWarnings bool
 
+	// 每次执行后休眠多少毫秒. 用以降低对线上数据库的影响，特别是针对大量写入的操作.
+	// 单位为毫秒，最小值为0, 最大值为100秒，也就是100000毫秒
+	sleep int
+	// 执行多条后休眠, 最小值1,默认值1
+	sleepRows int
+
 	// 仅供第三方扩展使用! 设置该字符串会跳过binlog解析!
 	middlewareExtend string
 	middlewareDB     string
+	// 原始主机和端口,用以解析binlog
+	parseHost string
+	parsePort int
 
 	// sql指纹功能,可在调用参数中设置,也可全局设置,值取并集
 	fingerprint bool
@@ -897,6 +907,11 @@ func (s *session) executeCommit(ctx context.Context) {
 		return
 	}
 
+	defer func() {
+		// 执行结束后清理osc进程信息
+		s.cleanup()
+	}()
+
 	s.executeAllStatement(ctx)
 
 	// 只要有执行成功的,就添加备份
@@ -967,6 +982,8 @@ func (s *session) executeCommit(ctx context.Context) {
 
 		if !s.isMiddleware() {
 			// 解析binlog生成回滚语句
+			s.Parser(ctx)
+		} else if s.opt.parseHost != "" && s.opt.parsePort != 0 {
 			s.Parser(ctx)
 		}
 	}
@@ -1386,8 +1403,9 @@ func (s *session) getRemoteBackupDBName(record *Record) string {
 	v := fmt.Sprintf("%s_%d_%s", s.opt.host, s.opt.port, record.TableInfo.Schema)
 
 	if len(v) > mysql.MaxDatabaseNameLength {
-		s.AppendErrorNo(ER_TOO_LONG_BAKDB_NAME, s.opt.host, s.opt.port, record.TableInfo.Schema)
-		return ""
+		v = v[len(v)-mysql.MaxDatabaseNameLength:]
+		// s.AppendErrorNo(ER_TOO_LONG_BAKDB_NAME, s.opt.host, s.opt.port, record.TableInfo.Schema)
+		// return ""
 	}
 
 	v = strings.Replace(v, "-", "_", -1)
@@ -1461,7 +1479,33 @@ func (s *session) executeAllStatement(ctx context.Context) {
 			s.AppendErrorMessage("Operation has been killed!")
 			break
 		}
+
+		if s.opt.sleep > 0 && s.opt.sleepRows > 0 {
+			if s.opt.sleepRows == 1 {
+				mysqlSleep(s.opt.sleep)
+			} else if i%s.opt.sleepRows == 0 {
+				mysqlSleep(s.opt.sleep)
+			}
+		}
 	}
+}
+
+// mysqlSleep Sleep for a while
+func mysqlSleep(ms int) {
+	if ms <= 0 {
+		return
+	}
+
+	if ms > 100000 {
+		ms = 100000
+	}
+
+	for end := time.Now().Add(time.Duration(ms) * time.Millisecond); time.Now().Before(end); {
+	}
+
+	return
+
+	// time.Sleep(time.Duration(ms) * time.Millisecond)
 }
 
 func (s *session) executeRemoteCommand(record *Record) int {
@@ -1499,6 +1543,7 @@ func (s *session) executeRemoteCommand(record *Record) int {
 	return int(record.ErrLevel)
 }
 
+// sqlStatisticsIncrement save statistics info
 func (s *session) sqlStatisticsIncrement(record *Record) {
 
 	if !s.opt.execute || !s.Inc.EnableSqlStatistic || s.statistics == nil {
@@ -2170,9 +2215,13 @@ func (s *session) parseOptions(sql string) {
 		execute:        viper.GetBool("execute"),
 		backup:         viper.GetBool("backup"),
 		ignoreWarnings: viper.GetBool("ignoreWarnings"),
+		sleep:          viper.GetInt("sleep"),
+		sleepRows:      viper.GetInt("sleepRows"),
 
 		middlewareExtend: viper.GetString("middlewareExtend"),
 		middlewareDB:     viper.GetString("middlewareDB"),
+		parseHost:        viper.GetString("parseHost"),
+		parsePort:        viper.GetInt("parsePort"),
 
 		fingerprint: viper.GetBool("fingerprint"),
 
@@ -2187,6 +2236,12 @@ func (s *session) parseOptions(sql string) {
 
 		// 审核阶段自动忽略警告,以免审核过早中止
 		s.opt.ignoreWarnings = true
+	}
+
+	if s.opt.sleep <= 0 {
+		s.opt.sleepRows = 0
+	} else if s.opt.sleepRows < 1 {
+		s.opt.sleepRows = 1
 	}
 
 	if s.opt.split || s.opt.Print {
@@ -2211,7 +2266,6 @@ func (s *session) parseOptions(sql string) {
 		addr = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&maxAllowedPacket=%d&maxOpen=100&maxLifetime=60",
 			s.opt.user, s.opt.password, s.opt.host, s.opt.port,
 			s.opt.middlewareDB, s.Inc.MaxAllowedPacket)
-
 	}
 
 	db, err := gorm.Open("mysql", addr)
@@ -2576,8 +2630,10 @@ func (s *session) checkCreateTable(node *ast.CreateTableStmt, sql string) {
 			for _, opt := range node.Options {
 				switch opt.Tp {
 				case ast.TableOptionEngine:
-					if !strings.EqualFold(opt.StrValue, "innodb") {
-						s.AppendErrorNo(ER_TABLE_MUST_INNODB, node.Table.Name.O)
+					if s.Inc.EnableSetEngine {
+						s.checkEngine(opt.StrValue)
+					} else {
+						s.AppendErrorNo(ER_CANT_SET_ENGINE, node.Table.Name.O)
 					}
 				case ast.TableOptionCharset:
 					if s.Inc.EnableSetCharset {
@@ -2804,8 +2860,10 @@ func (s *session) checkTableOptions(options []*ast.TableOption, table string, is
 	for _, opt := range options {
 		switch opt.Tp {
 		case ast.TableOptionEngine:
-			if !strings.EqualFold(opt.StrValue, "innodb") {
-				s.AppendErrorNo(ER_TABLE_MUST_INNODB, table)
+			if s.Inc.EnableSetEngine {
+				s.checkEngine(opt.StrValue)
+			} else {
+				s.AppendErrorNo(ER_CANT_SET_ENGINE, table)
 			}
 		case ast.TableOptionCharset:
 			if s.Inc.EnableSetCharset {
@@ -4876,30 +4934,30 @@ func (s *session) executeLocalShowProcesslist(node *ast.ShowStmt) ([]ast.RecordS
 	res := NewProcessListSets(len(pl))
 
 	for _, k := range keys {
-		pi := pl[uint64(k)]
+		if pi, ok := pl[uint64(k)]; ok {
+			var info string
+			if node.Full {
+				info = pi.Info
+			} else {
+				info = fmt.Sprintf("%.100v", pi.Info)
+			}
 
-		var info string
-		if node.Full {
-			info = pi.Info
-		} else {
-			info = fmt.Sprintf("%.100v", pi.Info)
+			data := []interface{}{
+				pi.ID,
+				pi.DestUser,
+				pi.DestHost,
+				pi.DestPort,
+				pi.Host,
+				pi.Command,
+				pi.OperState,
+				int64(time.Since(pi.Time) / time.Second),
+				info,
+			}
+			if pi.Percent > 0 {
+				data = append(data, fmt.Sprintf("%.2f%%", pi.Percent*100))
+			}
+			res.appendRow(data)
 		}
-
-		data := []interface{}{
-			pi.ID,
-			pi.DestUser,
-			pi.DestHost,
-			pi.DestPort,
-			pi.Host,
-			pi.Command,
-			pi.OperState,
-			int64(time.Since(pi.Time) / time.Second),
-			info,
-		}
-		if pi.Percent > 0 {
-			data = append(data, fmt.Sprintf("%.2f%%", pi.Percent*100))
-		}
-		res.appendRow(data)
 	}
 
 	s.sessionVars.StmtCtx.AddAffectedRows(uint64(res.rc.count))
@@ -4913,17 +4971,28 @@ func (s *session) executeLocalShowOscProcesslist(node *ast.ShowOscStmt) ([]ast.R
 	res := NewOscProcessListSets(len(pl), node.Sqlsha1 != "")
 
 	if node.Sqlsha1 == "" {
+
+		var keys []int
+		all := make(map[uint64]*util.OscProcessInfo, len(pl))
 		for _, pi := range pl {
-			data := []interface{}{
-				pi.Schema,
-				pi.Table,
-				pi.Command,
-				pi.Sqlsha1,
-				pi.Percent,
-				pi.RemainTime,
-				pi.Info,
+			keys = append(keys, int(pi.ID))
+			all[pi.ID] = pi
+		}
+		sort.Ints(keys)
+
+		for _, k := range keys {
+			if pi, ok := all[uint64(k)]; ok {
+				data := []interface{}{
+					pi.Schema,
+					pi.Table,
+					pi.Command,
+					pi.Sqlsha1,
+					pi.Percent,
+					pi.RemainTime,
+					pi.Info,
+				}
+				res.appendRow(data)
 			}
-			res.appendRow(data)
 		}
 	} else if pi, ok := pl[node.Sqlsha1]; ok {
 		data := []interface{}{
@@ -5124,6 +5193,19 @@ func (s *session) checkCollation(collation string) bool {
 			}
 		}
 		s.AppendErrorNo(ErrCollationNotSupport, s.Inc.SupportCollation)
+		return false
+	}
+	return true
+}
+
+func (s *session) checkEngine(engine string) bool {
+	if s.Inc.SupportEngine != "" {
+		for _, item := range strings.Split(s.Inc.SupportEngine, ",") {
+			if strings.EqualFold(item, engine) {
+				return true
+			}
+		}
+		s.AppendErrorNo(ErrEngineNotSupport, s.Inc.SupportEngine)
 		return false
 	}
 	return true
@@ -5848,10 +5930,6 @@ func (s *session) checkInceptionVariables(number int) bool {
 		if s.Inc.EnableJsonType {
 			return false
 		}
-	case ER_TABLE_MUST_INNODB:
-		if s.Inc.EnableNotInnodb {
-			return false
-		}
 	case ER_PK_COLS_NOT_INT:
 		return s.Inc.EnablePKColumnsOnlyInt
 
@@ -6499,4 +6577,28 @@ func (s *session) addNewSplitNode() {
 	s.splitSets.tableList = make(map[string]bool)
 	s.splitSets.ddlflag = 0
 	s.splitSets.sqlBuf = new(bytes.Buffer)
+}
+
+// cleanup 清理变量,缓存,osc进程等
+func (s *session) cleanup() {
+	if s.sessionManager == nil {
+		return
+	}
+	// 执行完成或中止后清理osc进程信息
+	pl := s.sessionManager.ShowOscProcessList()
+	if len(pl) == 0 {
+		return
+	}
+	oscList := []string{}
+	for _, pi := range pl {
+		if pi.ConnID == s.sessionVars.ConnectionID {
+			oscList = append(oscList, pi.Sqlsha1)
+		}
+	}
+
+	if len(oscList) > 0 {
+		for _, sha1 := range oscList {
+			delete(pl, sha1)
+		}
+	}
 }
